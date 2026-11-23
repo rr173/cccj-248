@@ -26,6 +26,11 @@ class RefusalReason(Enum):
     WRONG_SOURCE_MATERIAL = "wrong_source_material"     # 调拨源批物料不一致
     WRONG_SOURCE_WAREHOUSE = "wrong_source_warehouse"   # 调拨源批原仓点不一致
     LATER_BATCH_SEQ = "later_batch_seq"                 # 从业务序号更晚的批次取货
+    # 存货成本结账专用
+    MISSING_COST = "missing_cost"                       # 必需的成本记录缺失（不以零补价）
+    DUPLICATE_COST = "duplicate_cost"                   # 同一事件版本出现多条成本记录
+    INVALID_COST = "invalid_cost"                       # 金额不是非负整数分
+    INVALID_CLOSING_RANGE = "invalid_closing_range"     # 期末业务截止号早于期初
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,7 @@ class LedgerContradiction:
     reason: RefusalReason
     event_id: str | None                     # None 表示问题出在查询参数本身
     detail: str
+    report_seq: int | None = None            # 成本结账指向具体报送版本时填写
 
 
 @dataclass(frozen=True)

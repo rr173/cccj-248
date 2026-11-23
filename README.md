@@ -6,9 +6,10 @@
 ## 运行方式
 
 ```bash
-python3 -I /workspace/run_tests.py   # 54 项验收（领料 19 项 + 来料追溯 35 项）
+python3 -I /workspace/run_tests.py   # 79 项验收（领料 19 + 追溯 37 + 成本结账 23）
 python3 -I /workspace/demo.py        # 可读的领料解释与库存更正对照
 python3 -I /workspace/trace_demo.py  # 来料抽检：隔离/召回清单与可回查依据
+python3 -I /workspace/cost_demo.py   # 存货成本结账：期初/期内/期末与逐批核对
 ```
 
 仅使用 Python 标准库；全部计数为精确整数（无浮点、无逐实体单位拆行）。
@@ -107,6 +108,69 @@ result: TraceabilityResult = build_traceability_list(reports, query)
 中间批可以出现在依据里，但只要受影响位置已被后续业务消耗，就不会出现在
 隔离或召回行（验收 `test_intermediate_batch_not_counted_as_pending_goods`）。
 
+## 存货成本结账（`cost_*` 模块）
+
+在同一份实物账（收货/调拨/生产/发运过账）上贴金额，结出**期初 / 期内增减 /
+期末**三张可核对的成本表。数量口径、版本规则和矛盾判定与追溯模块完全一致：
+以现有实物账的批次有效版本、批内位置和耗用规则为准，不读领料计划，也不需要
+任何抽检范围。不做税费、跨币种或总账入账。
+
+### 接口（`wave_mrp/cost_model.py`、`cost_result.py`）
+
+```python
+from wave_mrp import (
+    ReceiptCost, ProductionCost, CostTable, ClosingQuery,
+    CostClosingEngine, build_closing_statement, close_inventory_costs,
+)
+
+reports = [EventReport(report_seq, event_id, business_seq, payload), ...]
+cost_table = CostTable(
+    receipt_costs=(ReceiptCost("R1", 100, 2), ...),      # (事件 ID, 报送序号) -> 整批入账金额（分）
+    production_costs=(ProductionCost("P1", 120, 6), ...) # (事件 ID, 报送序号) -> 加工金额（分）
+)
+query = ClosingQuery(
+    opening_business_cutoff=2,   # 含端点；之前的业务进期初
+    closing_business_cutoff=6,   # 含端点；之前的业务进期末
+    report_cutoff=500,           # 整次结账统一的报送截止号（含端点）
+)
+statement: ClosingStatement = build_closing_statement(reports, cost_table, query)
+# 同义入口：close_inventory_costs(...)；或复用引擎：
+# CostClosingEngine(reports).build_closing_statement(cost_table, query)
+```
+
+- `refused=False` 时读取结账单：
+  - `opening` / `closing`：`StockBalance` 行，按仓点/物料/批次给出
+    `quantity` 与 `amount`（分）；**有数量但金额为零的行也会列出**；
+  - `movements`：期内按业务顺序的 `MovementLine`，每笔按受影响仓点/物料/
+    批次给出带符号数量与金额，并注明 `event_id`、**采用的 `report_seq`**；
+    发运减记的负数金额就是这笔发出成本；一次调拨的多行共享
+    `transfer_group`，组内金额之和为零；一次生产的净增金额等于加工金额；
+  - `adopted_reports`：本次结账采用的事件→报送版本清单。
+- `refused=True` 时不出部分结账单：`opening`/`movements`/`closing` 全为空，
+  `contradictions` 给出全部拒绝来源（`RefusalReason` + `event_id` +
+  `report_seq` + 说明）。
+- 核对关系：对每个 (仓点, 物料, 批次)，`期初 + 期内 = 期末`（数量与金额
+  各自成立），可直接用 `statement.balance(仓点, 物料, 批次)` 逐行检查。
+
+### 规则与实现位置（`cost_engine.py`）
+
+| 需求条款 | 实现 |
+| --- | --- |
+| 只认现有实物账的有效版本，旧版不借价 | 复用 `LotTraceabilityEngine.select_reports`：先按业务/报送双截止筛选，再取每事件最后可见版本 |
+| 报送截止号整次结账统一使用 | `ClosingQuery.report_cutoff` 同时作用于期初与期末；两个业务截止号可相同，期末早于期初即 `invalid_closing_range` |
+| 每笔生效收货唯一整批入账金额、每笔生效生产唯一加工金额 | `_validate_costs`：按 `(event_id, report_seq)` 精确匹配采用版本 |
+| 零元必须显式登记、缺价不补零、不借旧价 | 缺记录 → `missing_cost`；同版本多条 → `duplicate_cost`；非非负整数分 → `invalid_cost` |
+| 未采用的成本记录完全不参与校验 | 只遍历本次生效事件；旧版本/截止号外/撤销事件/另一类记录一律忽略 |
+| 收货按入账金额建成本，生产按耗用片段成本 + 加工金额建产出批成本 | 收货/生产分支分别建 `_LotBasis`，生产 `input_amount = -Σ耗用金额` 再加加工金额 |
+| 拆单不移动余分：`[a,b)` 值 `floor(C*b/Q)-floor(C*a/Q)` | `_LotBasis.value`；调拨/发运/生产都按账上实际位置计价 |
+| 调拨保留各位置原金额、目标按单据顺序对应 | 目标批成本基为 `_ConcatBasis`/`_SliceBasis`；不从目标总金额重新摊平 |
+| 整批转运不遍历此前所有拼接段 | 整批取 `basis.total`（O(1)）；`_ConcatBasis` 预存起点与前缀和，任意子区间 O(log 段数) |
+| 批量超万亿不逐件展开 | 全流程仅用半开区间端点与整数分 |
+| 实物账有矛盾则整单拒绝 | 复用 `replay_physical_ledger`，与追溯接口同一套矛盾与版本规则 |
+
+`cost_demo.py` 给出期初/期内/期末的完整手算对照，包括把 `B0[1,2)` 接在
+`B0[2,3)` 之前调拨后目标批“第 1 件仍值 1 分、第 2 件值 0 分”的例子。
+
 ## 目录
 
 ```
@@ -117,10 +181,15 @@ wave_mrp/
   trace_model.py    追溯输入：区间、四类过账载荷、报送、查询
   trace_result.py   追溯输出：隔离/召回行、三类依据、拒绝结论
   trace_engine.py   报送筛选、实物账重放校验、受影响传播与清单组装
+  cost_model.py     成本结账输入：收货/生产成本记录、成本表、结账口径
+  cost_result.py    成本结账输出：期初/期末余额、期内增减、拒绝结论
+  cost_engine.py    成本记录校验、批内位置计价、期初期末快照与结账单
 tests/
   acceptance_test.py        19 项领料验收（5 个场景）
-  trace_acceptance_test.py  35 项追溯验收（端到端/传播/版本/拒绝/规模）
-run_tests.py      隔离模式测试入口（两套验收一起跑）
+  trace_acceptance_test.py  37 项追溯验收（端到端/传播/版本/拒绝/规模）
+  cost_acceptance_test.py   23 项成本结账验收（余分/拆单/生产/版本/拒绝/规模）
+run_tests.py      隔离模式测试入口（三套验收一起跑）
 demo.py           领料手算解释演示
 trace_demo.py     追溯手算演示（含版本替换、撤销、截止号外业务）
+cost_demo.py      成本结账手算演示（期初/期内/期末与逐批核对）
 ```

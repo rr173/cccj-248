@@ -1,9 +1,20 @@
 """波次领料 MRP 包：固定配方下的净需求汇总与整组投料求解。
 
-另含来料抽检追溯子模块（trace_*）：按固定截止号重放收货/调拨/生产/发运
-过账流水，输出在库隔离与发出召回清单及可回查的直接依据。
+另含两个以过账流水为准的子模块：
+  - 来料抽检追溯（trace_*）：按固定截止号重放收货/调拨/生产/发运流水，
+    输出在库隔离与发出召回清单及可回查的直接依据；
+  - 存货成本结账（cost_*）：在同一份实物账上贴整批入账金额与加工金额，
+    输出期初/期内/期末三张可核对的成本表。
 """
 
+from .cost_engine import (
+    CostClosingEngine,
+    InventoryCostClosingEngine,
+    build_closing_statement,
+    close_inventory_costs,
+)
+from .cost_model import ClosingQuery, CostTable, ProductionCost, ReceiptCost
+from .cost_result import ClosingStatement, MovementLine, StockBalance
 from .engine import WaveMRPEngine
 from .model import (
     Inventory,
@@ -92,4 +103,16 @@ __all__ = [
     "RefusalReason",
     "TraceabilityResult",
     "TransferEvidence",
+    # 存货成本结账
+    "InventoryCostClosingEngine",
+    "CostClosingEngine",
+    "close_inventory_costs",
+    "build_closing_statement",
+    "ClosingQuery",
+    "CostTable",
+    "ProductionCost",
+    "ReceiptCost",
+    "ClosingStatement",
+    "MovementLine",
+    "StockBalance",
 ]

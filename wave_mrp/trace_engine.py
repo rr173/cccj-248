@@ -177,6 +177,27 @@ class LotTraceabilityEngine:
 
         有效事件元素为 (business_seq, event_id, report_seq, payload|None)。
         """
+        return self._select_reports_by_cutoff(
+            query.business_cutoff, query.report_cutoff)
+
+    def select_reports(
+        self, business_cutoff: int, report_cutoff: int
+    ) -> tuple[list[tuple[int, str, int, object]], list[LedgerContradiction],
+               list[tuple[str, int | None]]]:
+        """公开的报送筛选：供成本结账等模块复用同一套版本规则。"""
+        return self._select_reports_by_cutoff(business_cutoff, report_cutoff)
+
+    def replay_physical_ledger(
+        self, events: list[tuple[int, str, int, object]]
+    ) -> tuple[dict[str, "_BatchState"], list[LedgerContradiction]]:
+        """公开的实物账重放：返回批次状态与全部矛盾。"""
+        return self._replay(events)
+
+    def _select_reports_by_cutoff(
+        self, business_cutoff: int, report_cutoff: int
+    ) -> tuple[list[tuple[int, str, int, object]], list[LedgerContradiction],
+               list[tuple[str, int | None]]]:
+        """按两个截止号筛选报送；成本结账复用同一套版本规则。"""
         errors: list[LedgerContradiction] = []
         seen_report_seq: dict[int, str] = {}
         # event_id -> (最大 report_seq, business_seq, payload)
@@ -195,8 +216,8 @@ class LotTraceabilityEngine:
                     f"业务序号必须是非负整数: {rep.business_seq!r}"))
                 continue
             # 两个截止号以外的报送一律不可见，不参与任何校验
-            if (rep.business_seq > query.business_cutoff
-                    or rep.report_seq > query.report_cutoff):
+            if (rep.business_seq > business_cutoff
+                    or rep.report_seq > report_cutoff):
                 continue
             if rep.report_seq in seen_report_seq:
                 errors.append(LedgerContradiction(
