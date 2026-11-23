@@ -31,6 +31,11 @@ class RefusalReason(Enum):
     DUPLICATE_COST = "duplicate_cost"                   # 同一事件版本出现多条成本记录
     INVALID_COST = "invalid_cost"                       # 金额不是非负整数分
     INVALID_CLOSING_RANGE = "invalid_closing_range"     # 期末业务截止号早于期初
+    # 更正包审包专用
+    EMPTY_CORRECTION_PACKAGE = "empty_correction_package"     # 更正包内没有任何更正
+    DUPLICATE_CORRECTION_TARGET = "duplicate_correction_target"  # 同包重复修改同一事件
+    UNKNOWN_CORRECTION_EVENT = "unknown_correction_event"     # 更正指向账内不存在的事件
+    STALE_CORRECTION_VERSION = "stale_correction_version"     # 制单所见报送版本已不是现版
 
 
 @dataclass(frozen=True)

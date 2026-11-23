@@ -6,10 +6,11 @@
 ## 运行方式
 
 ```bash
-python3 -I /workspace/run_tests.py   # 79 项验收（领料 19 + 追溯 37 + 成本结账 23）
+python3 -I /workspace/run_tests.py   # 102 项验收（领料 19 + 追溯 37 + 成本结账 23 + 审包 23）
 python3 -I /workspace/demo.py        # 可读的领料解释与库存更正对照
 python3 -I /workspace/trace_demo.py  # 来料抽检：隔离/召回清单与可回查依据
 python3 -I /workspace/cost_demo.py   # 存货成本结账：期初/期内/期末与逐批核对
+python3 -I /workspace/amendment_demo.py  # 更正包审包：补报、逐包接纳结果与发布截止号
 ```
 
 仅使用 Python 标准库；全部计数为精确整数（无浮点、无逐实体单位拆行）。
@@ -171,6 +172,65 @@ statement: ClosingStatement = build_closing_statement(reports, cost_table, query
 `cost_demo.py` 给出期初/期内/期末的完整手算对照，包括把 `B0[1,2)` 接在
 `B0[2,3)` 之前调拨后目标批“第 1 件仍值 1 分、第 2 件值 0 分”的例子。
 
+## 更正包审包（`amendment_*` 模块）
+
+更正一张原始单据常常要同时改另一张（两张发运单互换领用货段时，单改
+任何一张都会重复占货）。审包接口把按收单顺序到达的**更正包**裁定成一份
+可发布的补报：每包有唯一单号与一组按单内顺序排列的更正，包内更正
+**同时生效**。更正只替换既有事件的报送内容（或撤销），不新建事件身份、
+不改业务序号；版本校验以制单所见报送序号与当前现版比对。
+
+### 接口（`wave_mrp/amendment_model.py`、`amendment_result.py`）
+
+```python
+from wave_mrp import (
+    Correction, CorrectionPackage, CorrectionAcceptanceEngine,
+    adjudicate_correction_packages,
+)
+
+# 每条更正：既有事件 ID、制单时看到的报送序号、完整替换载荷（None=撤销）
+packages = [
+    CorrectionPackage("PKG-2", (
+        Correction("S1", observed_report_seq=110,
+                  replacement=ShipmentPayload("CUST-A", (Segment("B0", Interval(3, 6)),))),
+        Correction("S2", observed_report_seq=120,
+                  replacement=ShipmentPayload("CUST-B", (Segment("B0", Interval(0, 3)),))),
+    )),
+]
+result = adjudicate_correction_packages(history_reports, packages)
+# 复用引擎可连续受理多批，后续包以前面已接纳包生效后的现版为准：
+# engine = CorrectionAcceptanceEngine(history_reports)
+# result = engine.adjudicate(packages)
+```
+
+- 历史账本身有矛盾时 `history_refused=True`：不出包级结果与补报，
+  `history_contradictions` 指出原因（复用追溯模块同一套矛盾口径）。
+- 否则逐包返回 `package_results`（与输入同序）：
+  - 接纳：`accepted=True`，`new_reports` 是本包按单内顺序取得的连续新报送；
+  - 拒绝：`accepted=False`，`contradictions` 给出所涉事件与具体原因
+    （结构原因或定位到事件/批次的实物矛盾，不要求列完所有矛盾）。
+- `new_reports` 是全部已接纳包的新增 `EventReport`；`publish_cutoff`
+  是发布截止号——新报送号从历史最大报送号之后连续分配，即使替换内容
+  相同也产生新报送；拒绝包不占号，故截止号不会落在只生效一部分的包上。
+  无新增时截止号仍为历史最大报送号，空历史以 0 为起点。
+- 原始列表不改动；把 `new_reports` 追加到历史后，原有追溯/成本接口按
+  `publish_cutoff` 读到新账，用原截止号仍读到旧账。
+
+### 规则与实现位置（`amendment_engine.py`）
+
+| 需求条款 | 实现 |
+| --- | --- |
+| 历史全账取现版并核对实物，有矛盾即不发布 | 构造时复用 `select_reports` + `replay_physical_ledger` 做一次全量校验，缓存现版索引 |
+| 空包/同包重复修改/事件不存在/制单版本过期，整包拒绝 | `_adjudicate_one` 结构校验：`EMPTY_CORRECTION_PACKAGE`/`DUPLICATE_CORRECTION_TARGET`/`UNKNOWN_CORRECTION_EVENT`/`STALE_CORRECTION_VERSION` |
+| 版本与前面已接纳包生效后的现版比较 | 接纳即更新 `_current_seq`；撤销也是现版，恢复须引用撤销报送序号 |
+| 包内更正同时生效，替换后整份账符合实物规则才接纳 | 被改事件组成**关联子账**整体重放，沿用 `replay_physical_ledger` 全套实物规则（重复占货、超界、缺批、混料等） |
+| 旧单同样受约束（调拨缩短新批、旧发运引用被删位置则拒绝） | 子账闭包包含未改动的关联事件，重放自然报 `OUT_OF_RANGE_SEGMENT` 等矛盾 |
+| 不重读历史、不复制整份账、不重验无关货批 | 仅维护事件↔批次二部图关系索引；每包只重放关联闭包子账（验收以 monkeypatch 计数：4000 条无关流水一条不入子账） |
+| 关联覆盖撤下去的旧关系与加进来的新关系 | 被改事件用“旧现版载荷 + 替换载荷”双重播种，再沿二部图求闭包 |
+| 撤销建批事件后仍被下游引用要能发现 | 旧关系播种保证下游引用事件进入闭包，重放报 `MISSING_UPSTREAM_BATCH` |
+| 货段按批内区间理解，不按件展开 | 子账重放只操作半开 `Interval`；万亿批量验收仅用端点 |
+| 拒绝包不改任何现版、占用或报送号 | 拒绝在更新索引前返回；接纳才发号并更新 `_current_seq`/关系索引 |
+
 ## 目录
 
 ```
@@ -184,12 +244,17 @@ wave_mrp/
   cost_model.py     成本结账输入：收货/生产成本记录、成本表、结账口径
   cost_result.py    成本结账输出：期初/期末余额、期内增减、拒绝结论
   cost_engine.py    成本记录校验、批内位置计价、期初期末快照与结账单
+  amendment_model.py    审包输入：更正（事件 ID+制单所见序号+替换/撤销）、更正包
+  amendment_result.py   审包输出：逐包接纳结果、补报、发布截止号
+  amendment_engine.py   现版/关系增量索引、关联闭包子账重放、连续发号
 tests/
   acceptance_test.py        19 项领料验收（5 个场景）
   trace_acceptance_test.py  37 项追溯验收（端到端/传播/版本/拒绝/规模）
   cost_acceptance_test.py   23 项成本结账验收（余分/拆单/生产/版本/拒绝/规模）
-run_tests.py      隔离模式测试入口（三套验收一起跑）
+  amendment_acceptance_test.py  23 项审包验收（接纳/结构拒绝/实物规则/闭包增量/规模）
+run_tests.py      隔离模式测试入口（四套验收一起跑）
 demo.py           领料手算解释演示
 trace_demo.py     追溯手算演示（含版本替换、撤销、截止号外业务）
 cost_demo.py      成本结账手算演示（期初/期内/期末与逐批核对）
+amendment_demo.py 审包手算演示（互换货段、版本过期、新旧截止号两账）
 ```

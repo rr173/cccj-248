@@ -7,6 +7,12 @@
     输出期初/期内/期末三张可核对的成本表。
 """
 
+from .amendment_engine import (
+    CorrectionAcceptanceEngine,
+    adjudicate_correction_packages,
+)
+from .amendment_model import Correction, CorrectionPackage
+from .amendment_result import AmendmentResult, CorrectionDecision
 from .cost_engine import (
     CostClosingEngine,
     InventoryCostClosingEngine,
@@ -115,4 +121,11 @@ __all__ = [
     "ClosingStatement",
     "MovementLine",
     "StockBalance",
+    # 更正包审包（补报裁定）
+    "CorrectionAcceptanceEngine",
+    "adjudicate_correction_packages",
+    "Correction",
+    "CorrectionPackage",
+    "AmendmentResult",
+    "CorrectionDecision",
 ]
